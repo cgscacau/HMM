@@ -1687,7 +1687,7 @@ with tab_tesouro:
     with col_info_td:
         st.caption(
             "Fonte: Tesouro Transparente (gov.br). "
-            "Se indisponível, utiliza snapshot de referência de 2025."
+            f"Se indisponível, utiliza snapshot de referência de {datetime.date.today().year}."
         )
 
     if load_td_btn:
