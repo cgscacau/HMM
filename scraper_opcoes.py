@@ -69,7 +69,19 @@ def _make_driver() -> webdriver.Chrome:
     )
     opts.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
     opts.add_experimental_option("useAutomationExtension", False)
-    drv = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
+    if os.name == 'posix':
+        # Em Linux (Streamlit Cloud), precisamos usar o Chromium do SO
+        opts.binary_location = "/usr/bin/chromium"
+        # O ChromeDriverManager às vezes falha ao achar o driver certo para o Chromium de repositório,
+        # tentar forçar o uso do /usr/bin/chromedriver que vem no packages.txt do Streamlit Cloud
+        try:
+            service = Service("/usr/bin/chromedriver")
+        except:
+            service = Service(ChromeDriverManager().install())
+    else:
+        service = Service(ChromeDriverManager().install())
+        
+    drv = webdriver.Chrome(service=service, options=opts)
     drv.execute_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
     return drv
 

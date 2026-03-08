@@ -13,6 +13,7 @@ Hierarquia de fontes:
 
 import datetime
 import warnings
+import os
 from typing import Dict, Optional
 
 import numpy as np
@@ -333,7 +334,15 @@ def _buscar_selenium() -> Optional[pd.DataFrame]:
         import logging
         logging.getLogger("WDM").setLevel(logging.ERROR)
 
-        service = ChromeService(ChromeDriverManager().install())
+        if os.name == 'posix':
+            opts.binary_location = "/usr/bin/chromium"
+            try:
+                service = ChromeService("/usr/bin/chromedriver")
+            except:
+                service = ChromeService(ChromeDriverManager().install())
+        else:
+            service = ChromeService(ChromeDriverManager().install())
+            
         driver = webdriver.Chrome(service=service, options=opts)
         driver.set_page_load_timeout(30)
 
