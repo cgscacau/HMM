@@ -1819,25 +1819,38 @@ with tab_tesouro:
         st.caption("Ajuste os pesos de cada título. A duration ponderada do portfólio é recalculada.")
 
         titulos_td = df_td["Titulo"].tolist()
-        n_td = len(titulos_td)
-        peso_default_td = round(100.0 / n_td, 1)
+        
+        titulos_selecionados = st.multiselect(
+            "Selecione os títulos para incluir no portfólio:",
+            options=titulos_td,
+            # Seleciona os 3 primeiros por padrão se houver, pra não vir vazio
+            default=titulos_td[:3] if len(titulos_td) >= 3 else titulos_td,
+            key="td_portfolio_select"
+        )
+        
+        n_td = len(titulos_selecionados)
+        peso_default_td = round(100.0 / n_td, 1) if n_td > 0 else 0.0
 
-        with st.form("form_portfolio_td"):
-            st.markdown("**Pesos por título (%):**")
-            cols_peso = st.columns(min(3, n_td))
-            pesos_input = {}
-            for idx_td, titulo_td in enumerate(titulos_td):
-                col_idx_td = idx_td % 3
-                with cols_peso[col_idx_td]:
-                    short_td = titulo_td.replace("Tesouro ", "")
-                    pesos_input[titulo_td] = st.number_input(
-                        short_td, min_value=0.0, max_value=100.0,
-                        value=peso_default_td, step=1.0,
-                        key=f"td_peso_{idx_td}"
-                    )
-            calcular_port_btn = st.form_submit_button(
-                "🔢 Calcular Duration do Portfólio", use_container_width=True
-            )
+        if n_td > 0:
+            with st.form("form_portfolio_td"):
+                st.markdown("**Pesos por título (%):**")
+                cols_peso = st.columns(min(3, n_td))
+                pesos_input = {}
+                for idx_td, titulo_td in enumerate(titulos_selecionados):
+                    col_idx_td = idx_td % 3
+                    with cols_peso[col_idx_td]:
+                        short_td = titulo_td.replace("Tesouro ", "")
+                        pesos_input[titulo_td] = st.number_input(
+                            short_td, min_value=0.0, max_value=100.0,
+                            value=peso_default_td, step=1.0,
+                            key=f"td_peso_{titulo_td}"
+                        )
+                calcular_port_btn = st.form_submit_button(
+                    "🔢 Calcular Duration do Portfólio", use_container_width=True
+                )
+        else:
+            st.info("Selecione pelo menos um título acima para montar o portfólio.")
+            calcular_port_btn = False
 
         if calcular_port_btn:
             total_pesos_td = sum(pesos_input.values())
