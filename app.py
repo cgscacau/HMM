@@ -33,6 +33,7 @@ from rf_engine import (
     optimize_rf
 )
 from scraper_opcoes import buscar_dados_opcoes
+from regime_engine import build_composite_regime
 import streamlit as st
 
 warnings.filterwarnings("ignore")
@@ -206,325 +207,8 @@ def engineer_features(raw, interval, smoothing_hrs, **indicator_kwargs):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  4. HMM FIT
+#  (HMM and Optimization Logic migrated to regime_engine.py)
 # ═══════════════════════════════════════════════════════════════════════════
-def fit_hmm(df, n_states, interval, min_regime_hrs):
-    scaler = StandardScaler()
-    X = scaler.fit_transform(df[FEATURES].values)
-
-    model = GaussianHMM(n_components=n_states, covariance_type="full",
-                        n_iter=1000, random_state=42, verbose=False)
-    model.fit(X)
-
-    # Fix degenerate states: if any transmat row sums to 0, normalize it
-    transmat = model.transmat_.copy()
-    row_sums = transmat.sum(axis=1, keepdims=True)
-    bad_rows = (row_sums == 0).flatten()
-    if bad_rows.any():
-        # Give uniform transition to degenerate states
-        transmat[bad_rows] = 1.0 / n_states
-        row_sums[bad_rows] = 1.0
-    model.transmat_ = transmat / row_sums
-
-    try:
-        raw_states = model.predict(X)
-    except ValueError:
-        # Fallback: use K-means clustering if HMM fails
-        from sklearn.cluster import KMeans
-        km = KMeans(n_clusters=n_states, random_state=42, n_init=10)
-        raw_states = km.fit_predict(X)
-
-    # Reorder by mean return
-    means = {}
-    for s in range(n_states):
-        mask = raw_states == s
-        means[s] = df.loc[mask, "Return"].mean() if mask.any() else 0.0
-    remap = {old: new for new, old in enumerate(sorted(means, key=means.get))}
-    df["State"] = np.array([remap[s] for s in raw_states])
-
-    # Smooth short flips
-    min_b = _bars(min_regime_hrs, interval)
-    states = df["State"].values.copy()
-    i = 0
-    while i < len(states):
-        j = i
-        while j < len(states) and states[j] == states[i]:
-            j += 1
-        if (j - i) < min_b and i > 0:
-            states[i:j] = states[i - 1]
-        else:
-            i = j
-            continue
-        i = j
-    df["State"] = states
-
-    converged = model.monitor_.converged
-    ll = model.score(X)
-    return df, converged, ll
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  5. BUILD SUMMARY
-# ═══════════════════════════════════════════════════════════════════════════
-def build_summary(df, n_states):
-    HOURS_PER_YEAR = 365.25 * 24
-    summary = (
-        df.groupby("State")["Return"]
-        .agg(Count="count", Mean_Return="mean", Std_Return="std")
-        .sort_index()
-    )
-    summary["Ann_Return"] = summary["Mean_Return"] * HOURS_PER_YEAR
-    summary["Ann_Vol"]    = summary["Std_Return"]  * np.sqrt(HOURS_PER_YEAR)
-    summary["Pct_Time"]   = (summary["Count"] / summary["Count"].sum() * 100).round(1)
-
-    tags = REGIME_TAGS.get(n_states, REGIME_TAGS[4])
-    for i, (tag, colour) in enumerate(tags):
-        if i in summary.index:
-            summary.loc[i, "Tag"]    = tag
-            summary.loc[i, "Colour"] = colour
-            summary.loc[i, "Action"] = REGIME_ACTIONS.get(tag, "")
-    return summary
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  6. CONFIRMED SIGNALS
-# ═══════════════════════════════════════════════════════════════════════════
-def find_transitions(df, n_states):
-    bull_thresh = n_states // 2
-    is_bull = df["State"] >= bull_thresh
-
-    rsi   = df["RSI_norm"].values
-    macd  = df["MACD_Hist"].values
-    ema_x = df["EMA_Cross"].values
-
-    buys, sells = [], []
-    prev = is_bull.iloc[0]
-    for i in range(1, len(df)):
-        curr = is_bull.iloc[i]
-        if curr and not prev:
-            bv = int(rsi[i] > 0.40) + int(macd[i] > 0) + int(ema_x[i] > 0)
-            if bv >= 2:
-                buys.append((df.index[i], df["Close"].iloc[i]))
-        elif not curr and prev:
-            sv = int(rsi[i] < 0.60) + int(macd[i] < 0) + int(ema_x[i] < 0)
-            if sv >= 2:
-                sells.append((df.index[i], df["Close"].iloc[i]))
-        prev = curr
-    return buys, sells
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  7. BACKTESTING
-# ═══════════════════════════════════════════════════════════════════════════
-def backtest(buys, sells):
-    signals = [(t, p, "BUY") for t, p in buys] + [(t, p, "SELL") for t, p in sells]
-    signals.sort(key=lambda x: x[0])
-
-    trades = []
-    entry_price = None
-    entry_time  = None
-    for t, price, sig in signals:
-        if sig == "BUY" and entry_price is None:
-            entry_price, entry_time = price, t
-        elif sig == "SELL" and entry_price is not None:
-            pnl_pct = (price - entry_price) / entry_price * 100
-            trades.append({"entry": entry_time, "exit": t,
-                           "entry_price": entry_price, "exit_price": price,
-                           "pnl_pct": pnl_pct})
-            entry_price = None
-
-    if not trades:
-        return {"trades": 0, "sharpe": -999}
-
-    tdf = pd.DataFrame(trades)
-    wins   = tdf[tdf["pnl_pct"] > 0]
-    losses = tdf[tdf["pnl_pct"] <= 0]
-
-    total    = len(tdf)
-    win_rate = len(wins) / total
-    avg_win  = wins["pnl_pct"].mean() if len(wins) else 0
-    avg_loss = abs(losses["pnl_pct"].mean()) if len(losses) else 0.001
-    rr       = avg_win / avg_loss if avg_loss > 0 else 0
-    expect   = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
-    kelly    = max(0, win_rate - (1 - win_rate) / rr) * 100 if rr > 0 else 0
-
-    rets     = tdf["pnl_pct"].values / 100
-    sharpe   = rets.mean() / rets.std() * np.sqrt(len(rets)) if rets.std() > 0 else 0
-    cum      = (1 + rets).cumprod()
-    run_max  = np.maximum.accumulate(cum)
-    max_dd   = ((cum - run_max) / run_max * 100).min()
-    total_ret = (cum[-1] - 1) * 100
-
-    return {
-        "trades": total, "win_rate": win_rate * 100, "avg_win": avg_win,
-        "avg_loss": avg_loss, "rr_ratio": rr, "expectation": expect,
-        "kelly": kelly, "sharpe": sharpe, "max_dd": max_dd,
-        "total_return": total_ret, "trade_log": tdf,
-    }
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  8. PLOTLY CHART
-# ═══════════════════════════════════════════════════════════════════════════
-def build_plotly_chart(df, summary, buys, sells, ticker, interval):
-    colour_map = {s: summary.loc[s, "Colour"] for s in summary.index}
-    tag_map    = {s: summary.loc[s, "Tag"]    for s in summary.index}
-
-    fig = make_subplots(
-        rows=3, cols=1, shared_xaxes=True,
-        row_heights=[0.65, 0.20, 0.15],
-        vertical_spacing=0.03,
-        subplot_titles=[
-            f"{ticker} ({interval}) — HMM Regime Detection — BUY / SELL",
-            "RSI (14)",
-            "Regime Timeline",
-        ],
-    )
-
-    # ── Panel 1: Price + regime bands + signals ─────────────────────────────
-    # Regime bands
-    prev_s = df["State"].iloc[0]
-    bstart = df.index[0]
-    shapes = []
-    for i in range(1, len(df)):
-        c = df["State"].iloc[i]
-        if c != prev_s or i == len(df) - 1:
-            shapes.append(dict(
-                type="rect", xref="x", yref="paper",
-                x0=bstart, x1=df.index[i], y0=0, y1=1,
-                fillcolor=colour_map.get(prev_s, "#444"),
-                opacity=0.12, layer="below", line_width=0,
-            ))
-            bstart = df.index[i]
-            prev_s = c
-
-    # Price line
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df["Close"], mode="lines",
-        line=dict(color="white", width=1.2),
-        name="Price", showlegend=False,
-    ), row=1, col=1)
-
-    # BUY markers
-    if buys:
-        bt, bp = zip(*buys)
-        fig.add_trace(go.Scatter(
-            x=list(bt), y=list(bp), mode="markers",
-            marker=dict(symbol="triangle-up", size=12, color="#00e676",
-                        line=dict(width=1, color="white")),
-            name=f"BUY ({len(buys)})",
-        ), row=1, col=1)
-
-    # SELL markers
-    if sells:
-        st, sp = zip(*sells)
-        fig.add_trace(go.Scatter(
-            x=list(st), y=list(sp), mode="markers",
-            marker=dict(symbol="triangle-down", size=12, color="#ef5350",
-                        line=dict(width=1, color="white")),
-            name=f"SELL ({len(sells)})",
-        ), row=1, col=1)
-
-    # Legend entries for regimes
-    for state in sorted(summary.index):
-        fig.add_trace(go.Scatter(
-            x=[None], y=[None], mode="markers",
-            marker=dict(size=10, color=colour_map[state], symbol="square"),
-            name=tag_map[state], showlegend=True,
-        ), row=1, col=1)
-
-    # ── Panel 2: RSI ─────────────────────────────────────────────────────
-    fig.add_trace(go.Scatter(
-        x=df.index, y=df["RSI_norm"] * 100, mode="lines",
-        line=dict(color="#ab47bc", width=1),
-        name="RSI", showlegend=False,
-    ), row=2, col=1)
-
-    fig.add_hline(y=70, line_dash="dash", line_color="#ef5350",
-                  line_width=0.8, opacity=0.6, row=2, col=1)
-    fig.add_hline(y=30, line_dash="dash", line_color="#00e676",
-                  line_width=0.8, opacity=0.6, row=2, col=1)
-
-    fig.add_hrect(y0=70, y1=100, fillcolor="#ef5350", opacity=0.07,
-                  line_width=0, row=2, col=1)
-    fig.add_hrect(y0=0, y1=30, fillcolor="#00e676", opacity=0.07,
-                  line_width=0, row=2, col=1)
-
-    # ── Panel 3: Regime timeline ─────────────────────────────────────────
-    prev_s = df["State"].iloc[0]
-    bstart = df.index[0]
-    for i in range(1, len(df)):
-        c = df["State"].iloc[i]
-        if c != prev_s or i == len(df) - 1:
-            fig.add_vrect(
-                x0=bstart, x1=df.index[i],
-                fillcolor=colour_map.get(prev_s, "#444"),
-                opacity=0.85, line_width=0, row=3, col=1,
-            )
-            bstart = df.index[i]
-            prev_s = c
-
-    # Layout
-    fig.update_layout(
-        template="plotly_dark",
-        paper_bgcolor="#121212",
-        plot_bgcolor="#1a1a1a",
-        height=800,
-        margin=dict(l=60, r=30, t=50, b=40),
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.02,
-            xanchor="left", x=0, font=dict(size=11),
-            bgcolor="rgba(30,30,30,0.8)",
-        ),
-        shapes=shapes,
-        hovermode="x unified",
-    )
-
-    fig.update_yaxes(title_text="Price (USD)", row=1, col=1, gridcolor="#333")
-    fig.update_yaxes(title_text="RSI", row=2, col=1, range=[0, 100], gridcolor="#333")
-    fig.update_yaxes(showticklabels=False, row=3, col=1)
-    fig.update_xaxes(gridcolor="#333")
-
-    return fig
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-#  9. OPTIMIZER
-# ═══════════════════════════════════════════════════════════════════════════
-def run_optimization(raw, interval):
-    grid = {
-        "n_states":       [3, 4, 5],
-        "smoothing_hrs":  [6, 12, 24],
-        "min_regime_hrs": [4, 8, 12],
-        "rsi_period":     [10, 14, 21],
-    }
-    keys = list(grid.keys())
-    combos = list(itertools.product(*grid.values()))
-    results = []
-
-    progress = st.progress(0, text="Optimising parameters...")
-    for idx, vals in enumerate(combos):
-        p = dict(zip(keys, vals))
-        try:
-            df = engineer_features(raw, interval, p["smoothing_hrs"],
-                                   rsi_period=p["rsi_period"])
-            if len(df) < p["n_states"]:
-                continue
-            df, _, _ = fit_hmm(df, p["n_states"], interval, p["min_regime_hrs"])
-            buys, sells = find_transitions(df, p["n_states"])
-            m = backtest(buys, sells)
-            results.append({**p, **{k: v for k, v in m.items() if k != "trade_log"}})
-        except Exception:
-            continue
-        progress.progress((idx + 1) / len(combos),
-                          text=f"Testing {idx+1}/{len(combos)} combos...")
-
-    progress.empty()
-    if not results:
-        return None, None
-    rdf = pd.DataFrame(results).sort_values("sharpe", ascending=False)
-    best = rdf.iloc[0]
-    return rdf, best
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -539,17 +223,12 @@ defaults = {
     "ticker": "BTC-USD",
     "interval": "1h",
     "days": 365,
-    "n_states": 4,
-    "smoothing_hrs": 24,
-    "min_regime_hrs": 8,
-    "rsi_period": 14,
     "sr_pivot_window": 10,
     "sr_cluster_pct": 1.5,
     "sr_train_pct": 70,
     "rf_trees": 100,
     "rf_depth": 10,
     "rf_horizon": 1,
-    "hmm_opt_results": None,
     "sr_wf_results": None,
     "rf_opt_results": None
 }
@@ -559,14 +238,6 @@ for key, val in defaults.items():
         st.session_state[key] = val
 
 # ── Callbacks ────────────────────────────────────────────────────────────
-def apply_hmm_params():
-    if st.session_state.hmm_opt_results:
-        best = st.session_state.hmm_opt_results["best"]
-        st.session_state.n_states = int(best['n_states'])
-        st.session_state.smoothing_hrs = int(best['smoothing_hrs'])
-        st.session_state.min_regime_hrs = int(best['min_regime_hrs'])
-        st.session_state.rsi_period = int(best['rsi_period'])
-
 def apply_sr_params():
     if st.session_state.sr_wf_results:
         best = st.session_state.sr_wf_results["best"]
@@ -636,13 +307,6 @@ with st.sidebar:
                      key="days", step=1)
 
     st.markdown("---")
-    st.markdown("### 🔧 HMM Parameters")
-    n_states       = st.selectbox("Number of states", [3, 4, 5], key="n_states")
-    smoothing_hrs  = st.slider("Smoothing (hours)", 4, 48, key="smoothing_hrs", step=2)
-    min_regime_hrs = st.slider("Min regime duration (hours)", 2, 24, key="min_regime_hrs", step=2)
-    rsi_period     = st.slider("RSI period", 5, 30, key="rsi_period")
-
-    st.markdown("---")
     st.markdown("### 🎯 S/R Parameters")
     sr_pivot_window = st.slider("Pivot window", 3, 30, key="sr_pivot_window", step=1,
                                 help="Bars left/right to identify swing highs/lows")
@@ -660,7 +324,6 @@ with st.sidebar:
 
     st.markdown("---")
     run_btn      = st.button("🚀 Run Analysis", use_container_width=True, type="primary")
-    optimize_btn = st.button("🔍 Optimize Parameters", use_container_width=True)
 
 # ── Main Area ────────────────────────────────────────────────────────────
 st.markdown(f"# 📈 HMM Market Regime Detector")
@@ -679,51 +342,7 @@ tab_hmm, tab_sr, tab_rf, tab_opcoes, tab_tesouro = st.tabs([
 #  TAB 1 — HMM REGIMES (existing)
 # ═════════════════════════════════════════════════════════════════════════
 with tab_hmm:
-
-    if optimize_btn:
-        st.info(f"Downloading {ticker} ({interval}) data...")
-        raw = download_data(ticker, interval, days)
-        if raw.empty:
-            st.error(f"No data returned for {ticker}. Check the ticker symbol.")
-            st.stop()
-
-        st.success(f"Downloaded {len(raw):,} rows. Running optimization...")
-        rdf, best = run_optimization(raw, interval)
-
-        if rdf is None:
-            st.error("Optimization failed — no valid parameter combos.")
-        else:
-            st.session_state.hmm_opt_results = {"rdf": rdf, "best": best}
-
-    if st.session_state.hmm_opt_results:
-        res = st.session_state.hmm_opt_results
-        rdf = res["rdf"]
-        best = res["best"]
-
-        st.markdown("### 🏆 Top 10 Parameter Combinations")
-        display_cols = ["n_states", "smoothing_hrs", "min_regime_hrs", "rsi_period",
-                        "trades", "win_rate", "sharpe", "total_return", "max_dd", "kelly"]
-        st.dataframe(rdf.head(10)[display_cols].style.format({
-            "win_rate": "{:.1f}%", "sharpe": "{:.2f}", "total_return": "{:+.1f}%",
-            "max_dd": "{:.1f}%", "kelly": "{:.1f}%",
-        }), use_container_width=True)
-
-        st.markdown(f"""
-        **Best config:** States={int(best['n_states'])} | Smooth={int(best['smoothing_hrs'])}h
-        | MinRegime={int(best['min_regime_hrs'])}h | RSI={int(best['rsi_period'])}
-        | **Sharpe={best['sharpe']:.2f}** | Return={best['total_return']:+.1f}%
-        """)
-
-        c1, c2 = st.columns(2)
-        if c1.button("✅ Apply Best HMM Parameters", use_container_width=True, type="primary", on_click=apply_hmm_params):
-            st.success("Parameters applied! Re-running analysis...")
-            # No need for manual state update or rerun here, callback handles it
-        if c2.button("🗑️ Clear Results", use_container_width=True):
-            st.session_state.hmm_opt_results = None
-            st.rerun()
-
-    elif run_btn:
-        # ── Run full pipeline ────────────────────────────────────────────
+    if run_btn:
         with st.spinner(f"Downloading {ticker} ({interval})..."):
             raw = download_data(ticker, interval, days)
 
@@ -731,113 +350,92 @@ with tab_hmm:
             st.error(f"No data returned for {ticker}. Check the ticker symbol.")
             st.stop()
 
-        with st.spinner("Computing indicators & fitting HMM..."):
-            df = engineer_features(raw, interval, smoothing_hrs, rsi_period=rsi_period)
+        with st.spinner("Computing Market Regime Matrix..."):
+            from regime_engine import build_composite_regime
+            df, regime_data = build_composite_regime(raw)
 
-            if df.empty or len(df) < n_states:
-                st.error("Not enough data after feature engineering. Try more days or a different interval.")
+            if df.empty:
+                st.error("Not enough data to compute regimes.")
                 st.stop()
 
-            df, converged, ll = fit_hmm(df, n_states, interval, min_regime_hrs)
-            summary = build_summary(df, n_states)
-            buys, sells = find_transitions(df, n_states)
-            metrics = backtest(buys, sells)
-
         # ── Current Regime Diagnosis ──────────────────────────────────────
-        current_state = df["State"].iloc[-1]
         current_price = df["Close"].iloc[-1]
-        row = summary.loc[current_state]
-
-        avg_24h   = df["Return"].iloc[-24:].mean()
-        trend_dir = "↑ UP" if avg_24h > 0 else "↓ DOWN"
-        rsi_now   = df["RSI_norm"].iloc[-1] * 100
-        macd_now  = df["MACD_Hist"].iloc[-1]
-
-        regime_colour = row["Colour"]
-
+        
         st.markdown(f"""
-        <div class="regime-box" style="border-color: {regime_colour};">
-            <h2 style="color: {regime_colour}; margin:0; text-align:center;">
-                {row['Tag']}
+        <div class="regime-box" style="border-color: #00e676;">
+            <h2 style="color: #fff; margin:0; text-align:center;">
+                Market Regime Matrix
             </h2>
             <p style="color: #ccc; text-align:center; font-size:1.1em; margin:8px 0;">
-                {ticker} — ${current_price:,.2f} — Trend: {trend_dir}
-            </p>
-            <p style="color: #888; text-align:center; margin:0;">
-                {row['Action']}
+                {ticker} — ${current_price:,.2f}
             </p>
         </div>
         """, unsafe_allow_html=True)
 
-        # ── Metric Cards ──────────────────────────────────────────────────
-        if metrics["trades"] > 0:
-            c1, c2, c3, c4, c5, c6 = st.columns(6)
-            card = lambda col, title, val: col.markdown(
-                f'<div class="metric-card"><h3>{title}</h3><p>{val}</p></div>',
-                unsafe_allow_html=True)
-            card(c1, "Trades", str(metrics["trades"]))
-            card(c2, "Win Rate", f"{metrics['win_rate']:.1f}%")
-            card(c3, "Sharpe", f"{metrics['sharpe']:.2f}")
-            card(c4, "Total Return", f"{metrics['total_return']:+.1f}%")
-            card(c5, "Max Drawdown", f"{metrics['max_dd']:.1f}%")
-            card(c6, "Kelly %", f"{metrics['kelly']:.1f}%")
+        c1, c2, c3 = st.columns(3)
+        c1.markdown(f"### 📈 Trend Layer\n<h4 style='color:#29b6f6'>{regime_data['Trend']}</h4>", unsafe_allow_html=True)
+        c2.markdown(f"### 🌊 Volatility Layer\n<h4 style='color:#ffb74d'>{regime_data['Volatility']}</h4>", unsafe_allow_html=True)
+        c3.markdown(f"### 🧠 Statistical HMM\n<h4 style='color:#ab47bc'>{regime_data['HMM_Stat']}</h4>", unsafe_allow_html=True)
 
-        st.markdown("")
+        st.markdown(f"""
+        <div class="sr-assess" style="border-color: #ffb74d;">
+            <h3 style="color:#ffb74d; margin:0 0 12px 0; text-align:center;">
+                💡 Strategic Advice (Conviction: {regime_data['Conviction']}%)
+            </h3>
+            <p style="color:#eee; text-align:center; font-size:1.1em; margin:0;">
+                {regime_data['Strategy_Advice']}
+            </p>
+            <p style="color:#888; text-align:center; font-size:0.9em; margin-top:8px;">
+                HMM Converged: {regime_data['HMM_Converged']}
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # ── Simplified Plotly Chart ───────────────────────────────────────
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3],
+                            vertical_spacing=0.03, subplot_titles=(f"{ticker} Price & Trend Regimes", "Volatility (ATR %)"))
+        
+        # Color mapping for trend
+        trend_colors = {
+            'STRONG BULL': 'rgba(0, 230, 118, 0.2)',
+            'WEAK BULL': 'rgba(41, 182, 246, 0.2)',
+            'STRONG BEAR': 'rgba(239, 83, 80, 0.2)',
+            'WEAK BEAR': 'rgba(255, 183, 77, 0.2)',
+            'CHOPPY / NEUTRAL': 'rgba(158, 158, 158, 0.1)'
+        }
+        
+        # Add background shapes for Trend Regimes
+        shapes = []
+        bstart = df.index[0]
+        prev_t = df['Trend_Regime'].iloc[0]
+        
+        for i in range(1, len(df)):
+            curr_t = df['Trend_Regime'].iloc[i]
+            if curr_t != prev_t or i == len(df) - 1:
+                shapes.append(dict(
+                    type="rect", xref="x", yref="paper",
+                    x0=bstart, x1=df.index[i], y0=0, y1=1,
+                    fillcolor=trend_colors.get(prev_t, 'rgba(0,0,0,0)'),
+                    layer="below", line_width=0
+                ))
+                bstart = df.index[i]
+                prev_t = curr_t
+                
+        fig.add_trace(go.Scatter(x=df.index, y=df['Close'], mode='lines', name='Price', line=dict(color='white')), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['EMA_S'], mode='lines', name='EMA Short', line=dict(color='#29b6f6', width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_L'], mode='lines', name='SMA Long', line=dict(color='#ffb74d', width=2, dash='dash')), row=1, col=1)
+        
+        # Volatility Layer
+        fig.add_trace(go.Scatter(x=df.index, y=df['ATR_Pct'], mode='lines', name='ATR %', line=dict(color='#ab47bc')), row=2, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['ATR_75'], mode='lines', name='High Vol Threshold', line=dict(color='#ef5350', dash='dot')), row=2, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['ATR_25'], mode='lines', name='Low Vol Threshold', line=dict(color='#00e676', dash='dot')), row=2, col=1)
 
-        # ── Plotly Chart ──────────────────────────────────────────────────
-        fig = build_plotly_chart(df, summary, buys, sells, ticker, interval)
+        fig.update_layout(height=700, template='plotly_dark', shapes=shapes, hovermode='x unified')
         st.plotly_chart(fig, use_container_width=True)
 
-        # ── Extra Details ─────────────────────────────────────────────────
-        col_left, col_right = st.columns(2)
-
-        with col_left:
-            st.markdown("### 📊 Regime Summary")
-            disp = summary[["Tag", "Count", "Pct_Time", "Ann_Return", "Ann_Vol"]].copy()
-            disp.columns = ["Regime", "Count", "% Time", "Ann Return", "Ann Vol"]
-            st.dataframe(disp.style.format({
-                "% Time": "{:.1f}%", "Ann Return": "{:+.2f}",
-                "Ann Vol": "{:.2f}",
-            }), use_container_width=True)
-
-        with col_right:
-            st.markdown("### 📡 Indicator Snapshot")
-            snap_data = {
-                "Indicator": ["RSI", "MACD Hist", "Bollinger Pos", "EMA Cross", "Fib Level"],
-                "Value": [
-                    f"{rsi_now:.1f}",
-                    f"{macd_now:+.6f}",
-                    f"{df['BB_Pos'].iloc[-1]:.2f}",
-                    f"{df['EMA_Cross'].iloc[-1]:+.6f}",
-                    f"{df['Fib_Level'].iloc[-1]:.2f}",
-                ],
-                "Signal": [
-                    "Overbought" if rsi_now > 70 else "Oversold" if rsi_now < 30 else "Neutral",
-                    "Bullish" if macd_now > 0 else "Bearish",
-                    "Near Upper" if df["BB_Pos"].iloc[-1] > 0.8 else "Near Lower" if df["BB_Pos"].iloc[-1] < 0.2 else "Mid Band",
-                    "Bullish" if df["EMA_Cross"].iloc[-1] > 0 else "Bearish",
-                    "Near High" if df["Fib_Level"].iloc[-1] > 0.786 else "Near Low" if df["Fib_Level"].iloc[-1] < 0.382 else "Mid Range",
-                ],
-            }
-            st.dataframe(pd.DataFrame(snap_data), use_container_width=True, hide_index=True)
-
-        # Recent signals
-        st.markdown("### 🔔 Recent Signals")
-        all_sigs = [(t, p, "🟢 BUY") for t, p in buys] + [(t, p, "🔴 SELL") for t, p in sells]
-        all_sigs.sort(key=lambda x: x[0])
-        recent = all_sigs[-10:]
-        if recent:
-            sig_df = pd.DataFrame(recent, columns=["Time", "Price", "Signal"])
-            sig_df["Price"] = sig_df["Price"].apply(lambda x: f"${x:,.2f}")
-            sig_df["Time"]  = sig_df["Time"].astype(str).str[:19]
-            st.dataframe(sig_df.iloc[::-1], use_container_width=True, hide_index=True)
-        else:
-            st.info("No signals generated with current parameters.")
-
-        # HMM info
-        st.caption(f"HMM: {n_states} states | Converged: {converged} | LL: {ll:,.2f} | "
-                   f"Smoothing: {smoothing_hrs}h ({_bars(smoothing_hrs, interval)} bars) | "
-                   f"Min regime: {min_regime_hrs}h ({_bars(min_regime_hrs, interval)} bars)")
+        st.markdown("### 📊 Rolling Regime History")
+        disp_cols = ["Close", "Trend_Regime", "Vol_Regime", "HMM_Regime"]
+        st.dataframe(df[disp_cols].tail(15).iloc[::-1], use_container_width=True)
 
     else:
         # Landing state
@@ -1457,10 +1055,12 @@ with tab_rf:
                 st.error("No data found.")
                 st.stop()
 
-            # Use engineer_features to get HMM states and indicators
-            df_feat = engineer_features(raw, interval, smoothing_hrs, rsi_period=rsi_period)
-            df_feat, _, _ = fit_hmm(df_feat, n_states, interval, min_regime_hrs)
-            summary = build_summary(df_feat, n_states)
+            # Use new composite regime engine to get HMM states and indicators
+            df_feat = engineer_features(raw, interval, 24, rsi_period=14)
+            df_feat, regime_summary = build_composite_regime(df_feat)
+            
+            if "HMM_State_Mapped" in df_feat.columns:
+                df_feat["State"] = df_feat["HMM_State_Mapped"]
 
             X, y, feature_cols, returns_horizon = prepare_rf_data(df_feat, horizon=rf_horizon)
 
@@ -1481,7 +1081,7 @@ with tab_rf:
             atr = tr.rolling(14).mean().iloc[-1]
 
             last_price = df_feat["Close"].iloc[-1]
-            hmm_tag = summary.loc[df_feat["State"].iloc[-1], "Tag"]
+            hmm_tag = regime_summary["HMM_Stat"]
 
             advice = generate_trader_advice(
                 pred, prob_up, last_price, atr, hmm_tag, df_feat["Cacas_Pos"].iloc[-1]
