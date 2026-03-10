@@ -93,6 +93,7 @@ def analyse_zone_interactions(df, zones, cluster_pct=1.0):
         touches = 0
         bounces = 0
         breaks = 0
+        total_volume = 0.0
         
         # Very simplified interaction check
         for i in range(1, len(df)):
@@ -100,10 +101,12 @@ def analyse_zone_interactions(df, zones, cluster_pct=1.0):
             high = df['High'].iloc[i]
             close = df['Close'].iloc[i]
             prev_close = df['Close'].iloc[i-1]
+            vol = df['Volume'].iloc[i] if 'Volume' in df.columns else 0.0
             
             # Did price enter the zone?
             if low <= lvl + tol and high >= lvl - tol:
                 touches += 1
+                total_volume += vol
                 # Did it reverse (bounce)? 
                 # (Simple logic: if previous close was outside and current close is still outside)
                 if (prev_close > lvl + tol and close > lvl + tol) or \
@@ -120,6 +123,8 @@ def analyse_zone_interactions(df, zones, cluster_pct=1.0):
         nz['break_rate'] = 100 - hold_rate
         nz['touch_count'] = touches
         nz['trade_score'] = (hold_rate * z['touch_count']) / 10.0 # Heuristic
+        nz['volume'] = total_volume
+        nz['is_reliable'] = touches >= 3 and hold_rate >= 60.0
         final_zones.append(nz)
         
     return final_zones
@@ -244,11 +249,24 @@ def build_sr_chart(df, zones, ticker, interval, cluster_pct=1.0, split_idx=None)
                       x0=x_start, y0=lvl-h, x1=x_end, y1=lvl+h,
                       fillcolor=color, line_width=0, layer="below", row=1, col=1)
         
-        # Add Label (Probability/Hold Rate)
+        # Add Label (Probability/Hold Rate + Volume + Touches)
         if z['touch_count'] > 0:
+            vol = z.get('volume', 0)
+            if vol >= 1_000_000_000:
+                vol_str = f"{vol/1_000_000_000:.1f}B"
+            elif vol >= 1_000_000:
+                vol_str = f"{vol/1_000_000:.1f}M"
+            elif vol >= 1_000:
+                vol_str = f"{vol/1_000:.1f}k"
+            else:
+                vol_str = f"{vol:.0f}"
+                
+            star = "⭐ " if z.get('is_reliable', False) else ""
+            label_text = f"<b>{star}{lvl:.2f} | {z['hold_rate']:.0f}%</b><br><span style='font-size:10px;'>{z['touch_count']} Toques | Vol: {vol_str}</span>"
+
             fig.add_annotation(
                 x=x_end, y=lvl,
-                text=f"<b>{lvl:.2f} | {z['hold_rate']:.0f}%</b>",
+                text=label_text,
                 showarrow=False,
                 xanchor="left",
                 font=dict(size=12, color="#00e676" if z['type']=='SUPPORT' else "#ef5350"),
