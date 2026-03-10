@@ -2119,13 +2119,24 @@ with tab_tesouro:
                     vl_final = vl_aplicado * (1 + variacao_preco_pct)
                     lucro_titulo = vl_final - vl_aplicado
                     
+                    # Cálculo Extra: Projeção de Valor no Vencimento (Juros Compostos Nominais)
+                    anos_venc = linha_titulo["Anos_Venc"]
+                    if is_ipca:
+                        # IPCA Nominal Estimada a longo prazo = (1 + Juro Real)(1 + IPCA Implícito/Meta) - 1
+                        taxa_nominal_estimada = ((1.0 + taxa_simulada / 100.0) * (1.0 + inflacao_projetada / 100.0)) - 1.0
+                    else:
+                        taxa_nominal_estimada = taxa_simulada / 100.0
+                        
+                    valor_projetado_vencimento = vl_aplicado * ((1.0 + taxa_nominal_estimada) ** anos_venc)
+                    
                     resultados_mtm.append({
                         "Título": titulo_sim.replace("Tesouro ", ""),
                         "Valor Aplicado (R$)": vl_aplicado,
                         "Taxa Simulada (% a.a.)": taxa_simulada,
                         "Variação Estimada (%)": variacao_preco_pct * 100,
                         "Novo Valor Estimado (R$)": vl_final,
-                        "Lucro/Prejuízo (R$)": lucro_titulo
+                        "Lucro/Prejuízo (R$)": lucro_titulo,
+                        "Projeção Vencimento (R$)": valor_projetado_vencimento
                     })
                     
                     valor_aplicado_total += vl_aplicado
@@ -2191,7 +2202,8 @@ with tab_tesouro:
                             "Taxa Simulada (% a.a.)": "{:.2f}%",
                             "Variação Estimada (%)": "{:+.2f}%",
                             "Novo Valor Estimado (R$)": "R$ {:,.2f}",
-                            "Lucro/Prejuízo (R$)": "R$ {:+,.2f}"
+                            "Lucro/Prejuízo (R$)": "R$ {:+,.2f}",
+                            "Projeção Vencimento (R$)": "R$ {:,.2f}"
                         }),
                     use_container_width=True, hide_index=True
                 )
