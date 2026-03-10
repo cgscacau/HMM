@@ -2011,6 +2011,175 @@ with tab_tesouro:
                     use_container_width=True, hide_index=True,
                 )
 
+        # ── Seção 5: Simulador de Marcação a Mercado ───────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 💸 Simulador de Marcação a Mercado")
+        st.caption("Escolha os fundos/títulos, a quantidade aplicada e simule como uma alteração na taxa Selic ou juros futuros impactará o valor da sua carteira na marcação a mercado.")
+        
+        sim_titulos_selecionados = st.multiselect(
+            "Selecione os títulos para simular:",
+            options=titulos_td,
+            default=titulos_td[:1] if len(titulos_td) > 0 else [],
+            key="td_mtm_select"
+        )
+        
+        if len(sim_titulos_selecionados) > 0:
+            with st.form("form_mtm_td"):
+                st.markdown("**Valor Aplicado (R$):**")
+                cols_mtm = st.columns(min(3, len(sim_titulos_selecionados)))
+                valores_aplicados = {}
+                for idx_sim, titulo_sim in enumerate(sim_titulos_selecionados):
+                    col_idx_sim = idx_sim % 3
+                    with cols_mtm[col_idx_sim]:
+                        short_sim = titulo_sim.replace("Tesouro ", "")
+                        valores_aplicados[titulo_sim] = st.number_input(
+                            short_sim, min_value=0.0,
+                            value=1000.0, step=100.0, format="%.2f",
+                            key=f"td_mtm_{titulo_sim}"
+                        )
+                
+                # Slider para simular choque nos juros
+                st.markdown("**Simulação de Cotação de Mercado:**")
+                
+                col_slider1, col_slider2 = st.columns(2)
+                with col_slider1:
+                    st.caption("Expectativa de Juros Base")
+                    selic_projetada = st.slider(
+                        "Selic Projetada (% a.a.)",
+                        min_value=2.0, max_value=20.0, value=10.5, step=0.25,
+                        format="%.2f%%",
+                        help="Simulação da expectativa para a taxa básica de juros. Uma queda na Selic geralmente valoriza títulos de renda fixa."
+                    )
+                    
+                    # Assume uma Selic base de hoje (ex: 10.50%) para calcular um "choque" paralelo na curva para todos os títulos selecionados
+                    SELIC_BASE = 10.50
+                    choque_juros = selic_projetada - SELIC_BASE
+                with col_slider2:
+                    st.caption("Expectativa de Inflação (IPCA)")
+                    inflacao_projetada = st.slider(
+                        "Inflação Projetada (% a.a.)",
+                        min_value=0.0, max_value=15.0, value=4.5, step=0.1,
+                        format="%.1f%%",
+                        help="Impacta EXCLUSIVAMENTE títulos atrelados à inflação (IPCA+, Renda+, Educa+). Uma queda na inflação projetada desvaloriza esses títulos."
+                    )
+                    
+                    # Assume uma inflação base (ex: centro da meta + tolerância ou atual) de 4.5% para calcular o "choque" de mercado
+                    INFLACAO_BASE = 4.5
+                    choque_inflacao = inflacao_projetada - INFLACAO_BASE
+                
+                simular_mtm_btn = st.form_submit_button("Calculadora de Marcação a Mercado 🧮", use_container_width=True)
+                
+            if simular_mtm_btn:
+                resultados_mtm = []
+                lucro_total = 0.0
+                valor_final_total = 0.0
+                valor_aplicado_total = 0.0
+                
+                for titulo_sim in sim_titulos_selecionados:
+                    vl_aplicado = valores_aplicados[titulo_sim]
+                    linha_titulo = df_td[df_td["Titulo"] == titulo_sim].iloc[0]
+                    dur_mod = linha_titulo["Duration Modificada"]
+                    conv = linha_titulo["Convexidade"] if "Convexidade" in linha_titulo else 0.0
+                    taxa_atual = linha_titulo["Taxa_Compra (% a.a.)"]
+                    tipo = linha_titulo["Tipo"]
+                    
+                    # Se o título é atrelado à inflação, o choque total na YTM nominal 
+                    # é a soma do choque na taxa real com o choque na inflação implícita.
+                    is_ipca = tipo in ["NTN-B P", "NTN-B", "Renda+", "Educa+"]
+                    choque_total_aplicado = choque_juros
+                    if is_ipca:
+                        choque_total_aplicado += choque_inflacao
+                    
+                    # Nova taxa estimada
+                    taxa_simulada = taxa_atual + choque_total_aplicado
+                    
+                    # Aproximação MTM com Convexidade: 
+                    # Variação % Preço = -Duration_Modificada * dY + 0.5 * Convexidade * (dY)^2
+                    choque_decimal = choque_total_aplicado / 100.0
+                    variacao_preco_pct = (-dur_mod * choque_decimal) + (0.5 * conv * (choque_decimal ** 2))
+                    
+                    vl_final = vl_aplicado * (1 + variacao_preco_pct)
+                    lucro_titulo = vl_final - vl_aplicado
+                    
+                    resultados_mtm.append({
+                        "Título": titulo_sim.replace("Tesouro ", ""),
+                        "Valor Aplicado (R$)": vl_aplicado,
+                        "Taxa Simulada (% a.a.)": taxa_simulada,
+                        "Variação Estimada (%)": variacao_preco_pct * 100,
+                        "Novo Valor Estimado (R$)": vl_final,
+                        "Lucro/Prejuízo (R$)": lucro_titulo
+                    })
+                    
+                    valor_aplicado_total += vl_aplicado
+                    valor_final_total += vl_final
+                    lucro_total += lucro_titulo
+                    
+                df_mtm = pd.DataFrame(resultados_mtm)
+                
+                # Explicando o cálculo matemático
+                with st.expander("📚 Entenda o Cálculo e a Inflação"):
+                    st.markdown(f"""
+                    O sistema utiliza a **Duration Modificada** e a **Convexidade** de cada título para estimar a variação no preço com precisão para movimentos de taxa:
+                    `Variação no Preço ≈ [- (Duration) × (Variação Total)] + [½ × Convexidade × (Variação Total)²]`
+                    
+                    **E a Inflação? Onde ela entra?**
+                    Títulos Prefixados têm sua rentabilidade já cravada. Mas títulos como o IPCA+ são compostos de duas partes: uma **Taxa Real** fixa (ex: 6% a.a.) + a **Inflação** (IPCA). O mercado projeta uma inflação futura (a *inflação implícita*). 
+                    Se a expectativa de inflação subir, os investidores exigirão prêmios maiores para compensar, o que significa que a *taxa de mercado nominal* aumenta, derrubando o preço do título hoje.
+                    
+                    Por isso dividimos a simulação em duas partes absolutas:
+                    1. **Alteração na Expectativa de Juros Base:** O simulador considera uma Selic Base de {SELIC_BASE:.2f}% (usada como referência pura para choque paralelo). Ao setar o slider para {selic_projetada:.2f}%, o sistema aplica um choque real de mercado de **{choque_juros:+.2f}%** na taxa de **todos** os títulos. Quedas na referida taxa tendem a valorizar esses títulos no mercado secundário.
+                    2. **Alteração na Expectativa de Inflação:** Impacta *apenas* títulos atrelados ao IPCA. O simulador considera uma inflação base de {INFLACAO_BASE:.2f}% (meta/projeção neutra). Se você ajustar o slider para {inflacao_projetada:.1f}%, o sistema soma à curva IPCA um choque adicional de **{choque_inflacao:+.2f}%**. Se o mercado achar que a inflação será menor no futuro, esses títulos perdem parte sensível do seu "prêmio atrativo", derrubando seus preços (apesar de a queda na Selic ajudar um pouco).
+                    """)
+
+                # Definir cor de destaque do resultado total
+                cor_resultado = "#81c784" if lucro_total >= 0 else "#ef5350"
+                sinal_resultado = "+" if lucro_total >= 0 else ""
+                
+                st.markdown(f"""
+                <div style="background:linear-gradient(135deg,#1b2838,#16213e);
+                     border:2px solid {cor_resultado}; border-radius:12px;
+                     padding:16px 20px; margin-top:10px; margin-bottom:20px; text-align:center;">
+                  <h4 style="margin:0; color:#eee;">Resumo da Simulação de MTM</h4>
+                  <p style="margin:5px 0 0 0; color:#aaa; font-size:1.05em;">Impacto estimado considerando uma variação de <strong style="color:{cor_resultado};">{choque_juros:+.2f}%</strong> nas taxas de juros</p>
+                  <div style="display:flex; justify-content:center; gap:40px; margin-top:16px;">
+                    <div>
+                        <span style="color:#aaa; font-size:0.9em;">Total Aplicado</span><br>
+                        <span style="color:#fff; font-size:1.5em; font-weight:bold;">R$ {valor_aplicado_total:,.2f}</span>
+                    </div>
+                    <div>
+                        <span style="color:#aaa; font-size:0.9em;">Novo Saldo (MTM)</span><br>
+                        <span style="color:{cor_resultado}; font-size:1.5em; font-weight:bold;">R$ {valor_final_total:,.2f}</span>
+                    </div>
+                    <div>
+                        <span style="color:#aaa; font-size:0.9em;">Resultado Nominal</span><br>
+                        <span style="color:{cor_resultado}; font-size:1.5em; font-weight:bold;">{sinal_resultado} R$ {lucro_total:,.2f}</span>
+                    </div>
+                  </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                def colorir_resultado(val):
+                    if isinstance(val, (int, float)) and val < 0:
+                        return "color: #ef5350; font-weight: bold"
+                    elif isinstance(val, (int, float)) and val > 0:
+                        return "color: #81c784; font-weight: bold"
+                    return ""
+                
+                st.dataframe(
+                    df_mtm.style
+                        .applymap(colorir_resultado, subset=["Variação Estimada (%)", "Lucro/Prejuízo (R$)"])
+                        .format({
+                            "Valor Aplicado (R$)": "R$ {:,.2f}",
+                            "Taxa Simulada (% a.a.)": "{:.2f}%",
+                            "Variação Estimada (%)": "{:+.2f}%",
+                            "Novo Valor Estimado (R$)": "R$ {:,.2f}",
+                            "Lucro/Prejuízo (R$)": "R$ {:+,.2f}"
+                        }),
+                    use_container_width=True, hide_index=True
+                )
+        else:
+            st.info("Selecione os títulos que deseja simular e clique em 'Calculadora de Marcação a Mercado'.")
+
     else:
         st.markdown("""
 <div style="text-align:center; padding:60px 20px;">

@@ -236,7 +236,7 @@ def calcular_duration(
     # LFT: taxa flutuante — duration quase zero (próximo reset = 1 dia)
     if tipo == "LFT":
         pu = price if price else face_value
-        return {"macaulay": 0.01, "modified": 0.01, "dv01": pu * 0.01 / 10_000,
+        return {"macaulay": 0.01, "modified": 0.01, "convexity": 0.0, "dv01": pu * 0.01 / 10_000,
                 "ytm_pct": ytm * 100}
 
     years_to_mat = (maturity - reference_date).days / 365.25
@@ -275,9 +275,9 @@ def calcular_duration(
         else:
             cash_flows = [(years_to_mat, face_value)]
 
-    # PV de cada fluxo
     pv_total = 0.0
     weighted_time = 0.0
+    weighted_time_sq = 0.0
     periodic_ytm = ytm / freq
 
     for t_years, cf in cash_flows:
@@ -285,11 +285,14 @@ def calcular_duration(
         pv = cf / ((1 + periodic_ytm) ** periods)
         pv_total += pv
         weighted_time += t_years * pv
+        weighted_time_sq += t_years * (t_years + 1.0 / freq) * pv
 
     if pv_total <= 0:
         macaulay = years_to_mat
+        convexity = years_to_mat ** 2
     else:
         macaulay = weighted_time / pv_total
+        convexity = weighted_time_sq / (pv_total * (1 + periodic_ytm)**2)
 
     modified = macaulay / (1 + ytm / freq)
 
@@ -299,6 +302,7 @@ def calcular_duration(
     return {
         "macaulay":  round(macaulay, 4),
         "modified":  round(modified, 4),
+        "convexity": round(convexity, 4),
         "dv01":      round(dv01, 6),
         "ytm_pct":   round(ytm * 100, 4),
     }
@@ -632,6 +636,7 @@ def buscar_tesouro_direto() -> pd.DataFrame:
             "Preco_Compra (R$)":  price,
             "Duration Macaulay":  dur["macaulay"],
             "Duration Modificada": dur["modified"],
+            "Convexidade":        dur["convexity"],
             "DV01 (R$/bp)":       dur["dv01"],
         })
 
