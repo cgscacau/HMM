@@ -182,6 +182,10 @@ def build_composite_regime(df):
     # Determine actionable strategy based on the current (last) row
     last_row = df.iloc[-1]
     
+    tr = last_row.get('Trend_Regime', 'UNKNOWN')
+    vr = last_row.get('Vol_Regime', 'UNKNOWN')
+    hm = last_row.get('HMM_Regime', 'UNKNOWN')
+    
     # ── Dynamic Entry / Exit Calculation ───────────
     current_price = last_row['Close']
     atr = last_row.get('ATR_14', current_price * 0.02) # Fallback to 2% if missing
