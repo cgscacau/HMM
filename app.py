@@ -380,13 +380,27 @@ with tab_hmm:
         st.markdown(f"""
         <div class="sr-assess" style="border-color: #ffb74d;">
             <h3 style="color:#ffb74d; margin:0 0 12px 0; text-align:center;">
-                💡 Strategic Advice (Conviction: {regime_data['Conviction']}%)
+                💡 Recomendação Estratégica (Convicção: {regime_data['Conviction']}%)
             </h3>
             <p style="color:#eee; text-align:center; font-size:1.1em; margin:0;">
                 {regime_data['Strategy_Advice']}
             </p>
+            <div style="display:flex; justify-content:space-around; margin-top:16px; margin-bottom:12px; flex-wrap:wrap; gap:12px;">
+                <div style="background:rgba(41, 182, 246, 0.1); padding:10px 16px; border-radius:8px; border:1px solid #29b6f6; text-align:center; flex:1;">
+                    <span style="color:#29b6f6; font-size:0.85em; text-transform:uppercase;">🎯 Zona de Entrada</span><br>
+                    <span style="color:#fff; font-weight:700; font-size:1.05em;">{regime_data.get('Entry_Zone', 'N/A')}</span>
+                </div>
+                <div style="background:rgba(239, 83, 80, 0.1); padding:10px 16px; border-radius:8px; border:1px solid #ef5350; text-align:center; flex:1;">
+                    <span style="color:#ef5350; font-size:0.85em; text-transform:uppercase;">🚫 Stop Loss (Risco)</span><br>
+                    <span style="color:#fff; font-weight:700; font-size:1.05em;">{regime_data.get('Stop_Loss', 'N/A')}</span>
+                </div>
+                <div style="background:rgba(0, 230, 118, 0.1); padding:10px 16px; border-radius:8px; border:1px solid #00e676; text-align:center; flex:1;">
+                    <span style="color:#00e676; font-size:0.85em; text-transform:uppercase;">💰 Take Profit (Alvo)</span><br>
+                    <span style="color:#fff; font-weight:700; font-size:1.05em;">{regime_data.get('Take_Profit', 'N/A')}</span>
+                </div>
+            </div>
             <p style="color:#888; text-align:center; font-size:0.9em; margin-top:8px;">
-                HMM Converged: {regime_data['HMM_Converged']}
+                HMM Convergiu: {regime_data['HMM_Converged']}
             </p>
         </div>
         """, unsafe_allow_html=True)
@@ -629,10 +643,10 @@ with tab_sr:
         card = lambda col, title, val: col.markdown(
             f'<div class="metric-card"><h3>{title}</h3><p>{val}</p></div>',
             unsafe_allow_html=True)
-        card(mc1, "Support Zones", str(n_sup))
-        card(mc2, "Resistance Zones", str(n_res))
-        card(mc3, "Avg Hold Rate", f"{avg_hold:.0f}%")
-        card(mc4, "Strongest Level", f"${strongest['level']:,.2f}")
+        card(mc1, "Zonas de Suporte", str(n_sup))
+        card(mc2, "Zonas de Resistência", str(n_res))
+        card(mc3, "Taxa Média de Retenção", f"{avg_hold:.0f}%")
+        card(mc4, "Nível Mais Forte", f"${strongest['level']:,.2f}")
 
         st.markdown("")
 
@@ -1110,26 +1124,26 @@ with tab_rf:
 
         # ── Prediction Card ───────────────────────────────────────────────
 
-        pred_label = "UP 🟢" if pred == 1 else "DOWN 🔴"
+        pred_label = "ALTA 🟢" if pred == 1 else "BAIXA 🔴"
 
         # Color follows predicted direction, not raw prob_up value
         conf_color = "#00e676" if pred == 1 else "#ef5350"
         # Confidence = probability of the predicted direction
         conf_value = prob_up if pred == 1 else (1 - prob_up)
-        conf_label = "Confidence (UP)" if pred == 1 else "Confidence (DOWN)"
+        conf_label = "Confiança (ALTA)" if pred == 1 else "Confiança (BAIXA)"
 
         st.markdown(f"""
         <div class="sr-assess">
             <h3 style="color:#29b6f6; margin:0 0 12px 0; text-align:center;">
-                🌲 RF Prediction (Next {rf_horizon} Bars)
+                🌲 Previsão do Random Forest (Próximas {rf_horizon} Barras)
             </h3>
             <div style="display:flex; justify-content:space-around; align-items:center;">
                 <div style="text-align:center;">
-                    <span style="color:#aaa; font-size:0.9em;">Model Accuracy (Test)</span><br>
+                    <span style="color:#aaa; font-size:0.9em;">Acurácia do Modelo (Test)</span><br>
                     <span style="color:#fff; font-size:1.8em; font-weight:700;">{acc*100:.1f}%</span>
                 </div>
                 <div style="text-align:center;">
-                    <span style="color:#aaa; font-size:0.9em;">Predicted Direction</span><br>
+                    <span style="color:#aaa; font-size:0.9em;">Direção Prevista</span><br>
                     <span style="color:{conf_color}; font-size:2.2em; font-weight:900;">{pred_label}</span>
                 </div>
                 <div style="text-align:center;">
@@ -1143,12 +1157,12 @@ with tab_rf:
         col_la, col_lb = st.columns([1, 1])
         
         with col_la:
-            st.markdown("### 📊 Importance Analysis")
+            st.markdown("### 📊 Análise de Importância")
             fig_imp = build_importance_chart(importance)
             st.plotly_chart(fig_imp, use_container_width=True)
             
         with col_lb:
-            st.markdown("### 📈 Model Info")
+            st.markdown("### 📈 Infos do Modelo")
             st.info(f"""
             - **Horizon:** {rf_horizon} bars
             - **Trees:** {rf_trees}

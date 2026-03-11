@@ -47,16 +47,16 @@ def calculate_trend_regime(df, ema_short=20, ema_mid=50, sma_long=200, adx_perio
         # Bullish conditions
         if row['EMA_S'] > row['EMA_M'] > row['SMA_L']:
             if row['ADX'] > 25 and row['+DI'] > row['-DI']:
-                return 'STRONG BULL'
-            return 'WEAK BULL'
+                return 'ALTA FORTE (STRONG BULL)'
+            return 'ALTA FRACA (WEAK BULL)'
             
         # Bearish conditions
         if row['EMA_S'] < row['EMA_M'] < row['SMA_L']:
             if row['ADX'] > 25 and row['-DI'] > row['+DI']:
-                return 'STRONG BEAR'
-            return 'WEAK BEAR'
+                return 'BAIXA FORTE (STRONG BEAR)'
+            return 'BAIXA FRACA (WEAK BEAR)'
             
-        return 'CHOPPY / NEUTRAL'
+        return 'LATERALIZADO / NEUTRO'
         
     df['Trend_Regime'] = df.apply(classify_trend, axis=1)
     return df
@@ -88,14 +88,14 @@ def calculate_volatility_regime(df, atr_period=14, lookback=100):
         p25 = row['ATR_25']
         
         if pd.isna(val) or pd.isna(p75):
-            return 'NORMAL VOLATILITY'
+            return 'VOLATILIDADE NORMAL'
             
         if val > p75:
-            return 'HIGH VOLATILITY (RISK)'
+            return 'ALTA VOLATILIDADE (RISCO)'
         elif val < p25:
-            return 'LOW VOLATILITY (CONTRACTION)'
+            return 'BAIXA VOLATILIDADE (CONTRAÇÃO)'
         else:
-            return 'NORMAL VOLATILITY'
+            return 'VOLATILIDADE NORMAL'
             
     df['ATR_75'] = df['ATR_Pct'].rolling(window=lookback).quantile(0.75)
     df['ATR_25'] = df['ATR_Pct'].rolling(window=lookback).quantile(0.25)
@@ -152,12 +152,12 @@ def fit_advanced_hmm(df, n_states=4):
     df_clean['HMM_Mapped'] = df_clean['HMM_State_Raw'].map(remap)
     
     def assign_hmm_name(val):
-        if val == n_states - 1: return "MARK-UP" # Highest return
-        if val == 0: return "MARK-DOWN"          # Lowest return
+        if val == n_states - 1: return "MARK-UP / EXPANSÃO" # Highest return
+        if val == 0: return "MARK-DOWN / QUEDA"          # Lowest return
         
         # Intermediate states
-        if val == n_states - 2: return "ACCUMULATION / SLOW GRIND" 
-        return "DISTRIBUTION / CHOP"
+        if val == n_states - 2: return "ACUMULAÇÃO / LENTA ALTA" 
+        return "DISTRIBUIÇÃO / RUIDOSO"
         
     df_clean['HMM_Regime'] = df_clean['HMM_Mapped'].apply(assign_hmm_name)
     
@@ -182,40 +182,59 @@ def build_composite_regime(df):
     # Determine actionable strategy based on the current (last) row
     last_row = df.iloc[-1]
     
-    tr = last_row.get('Trend_Regime', 'UNKNOWN')
-    vr = last_row.get('Vol_Regime', 'UNKNOWN')
-    hm = last_row.get('HMM_Regime', 'UNKNOWN')
+    # ── Dynamic Entry / Exit Calculation ───────────
+    current_price = last_row['Close']
+    atr = last_row.get('ATR_14', current_price * 0.02) # Fallback to 2% if missing
+    ema_s = last_row.get('EMA_S', current_price)
+    sma_l = last_row.get('SMA_L', current_price - atr)
     
-    # Simple Synthesis Rules Engine
-    strategy = "Wait for clarity."
-    conviction = 0 # 0 to 100
+    entry_zone = "Aguardar"
+    stop_loss = "N/A"
+    take_profit = "N/A"
     
-    if "STRONG BULL" in tr:
-        if "LOW" in vr:
-            strategy = "Ideal Breakout Setup. Accumulate aggressively. Low volatility implies low risk of sudden stops."
+    if "ALTA FORTE" in tr:
+        if "BAIXA" in vr:
+            strategy = ("Aproveite breakouts para compras. Acumule com confiança. "
+                        "A baixa volatilidade indica menor risco de interrupções bruscas de tendência (stop hunts).")
             conviction = 90
-        elif "HIGH" in vr:
-            strategy = "Blow-off Top risk or violently trending market. Trade breakout but halve position sizes."
+        elif "ALTA" in vr:
+            strategy = ("Risco de Topo Exaustivo ou mercado de euforia extrema. "
+                        "Siga a tendência, mas limite o tamanho da sua posição devido à forte oscilação de preço.")
             conviction = 60
         else:
-            strategy = "Trend following. Buy dips to dynamic support (EMAs)."
+            strategy = "Seguidor de tendência. Compre nas retrações em suporte dinâmico de preços."
             conviction = 80
             
-    elif "STRONG BEAR" in tr:
-        if "HIGH" in vr:
-            strategy = "Panic Phase (Mark-Down). Do NOT catch falling knives. Sell bounces or hedge heavy."
+        entry_zone = f"R$ {ema_s:,.2f} (Retração na EMA Curta) ou Rompimento de R$ {last_row['High']:,.2f}"
+        stop_loss = f"R$ {(current_price - 1.5 * atr):,.2f} (Perda de Momento)"
+        take_profit = f"R$ {(current_price + 2.5 * atr):,.2f} (Alvo de Expansão)"
+            
+    elif "BAIXA FORTE" in tr:
+        if "ALTA" in vr:
+            strategy = ("Fase de Pânico (Mark-Down). NÃO tente segurar a queda. "
+                        "Venda nas retrações ou utilize posições de proteção/hedge defensivo fortes.")
             conviction = 90
         else:
-            strategy = "Slow bleed. Short resistance zones."
+            strategy = "Derretimento lento do preço. Venda em falhas de resistências curtas."
             conviction = 70
             
-    elif "CHOPPY" in tr or "NEUTRAL" in tr:
-        if "LOW" in vr:
-            strategy = "Accumulation/Base building. Use Iron Condors, sell theta, or wait for volume breakout."
+        entry_zone = f"Venda (Short) próximo a R$ {ema_s:,.2f} ou perda de R$ {last_row['Low']:,.2f}"
+        stop_loss = f"R$ {(current_price + 1.5 * atr):,.2f} (Recuperação de Tendência)"
+        take_profit = f"R$ {(current_price - 2.5 * atr):,.2f} (Alvo de Despejo)"
+            
+    elif "LATERALIZADO" in tr:
+        if "BAIXA" in vr:
+            strategy = ("Provavelmente forjando uma base / acumulação em andamento. "
+                        "Opere canais ou venda volatilidade com opções (e.g. Iron Condors). Aguarde explosão de volume para posicionar direcionalmente.")
             conviction = 50
         else:
-            strategy = "Whipsaw danger. Mean reversion strategies only. Fade the extremes of the range."  
+            strategy = ("Situação de forte ruído / Whipsaw. Alto risco direcional. "
+                        "Utilize apenas estratégias de reversão à média nas extremidades do range.")  
             conviction = 40
+            
+        entry_zone = f"Compra em R$ {(current_price - atr):,.2f} / Venda em R$ {(current_price + atr):,.2f} (Bandas)"
+        stop_loss = f"Fechamento externo a ±1.5x ATR"
+        take_profit = f"Retorno à Média (R$ {ema_s:,.2f})"
             
     return df, {
         "Trend": tr,
@@ -223,5 +242,8 @@ def build_composite_regime(df):
         "HMM_Stat": hm,
         "Strategy_Advice": strategy,
         "Conviction": conviction,
+        "Entry_Zone": entry_zone,
+        "Stop_Loss": stop_loss,
+        "Take_Profit": take_profit,
         "HMM_Converged": hmm_ok
     }
