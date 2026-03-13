@@ -192,6 +192,8 @@ def build_composite_regime(df):
     ema_s = last_row.get('EMA_S', current_price)
     sma_l = last_row.get('SMA_L', current_price - atr)
     
+    strategy = "Aguardando definição de tendência clara para posicionamento."
+    conviction = 30
     entry_zone = "Aguardar"
     stop_loss = "N/A"
     take_profit = "N/A"
@@ -212,7 +214,14 @@ def build_composite_regime(df):
         entry_zone = f"R$ {ema_s:,.2f} (Retração na EMA Curta) ou Rompimento de R$ {last_row['High']:,.2f}"
         stop_loss = f"R$ {(current_price - 1.5 * atr):,.2f} (Perda de Momento)"
         take_profit = f"R$ {(current_price + 2.5 * atr):,.2f} (Alvo de Expansão)"
-            
+
+    elif "ALTA FRACA" in tr:
+        strategy = "Tendência de alta perdendo ímpeto ou em estágio inicial. Procure por sinais de confirmação em tempos gráficos menores."
+        conviction = 50
+        entry_zone = f"Aguardar suporte em R$ {ema_s:,.2f}"
+        stop_loss = f"R$ {(current_price - atr):,.2f}"
+        take_profit = f"R$ {(current_price + 1.5 * atr):,.2f}"
+
     elif "BAIXA FORTE" in tr:
         if "ALTA" in vr:
             strategy = ("Fase de Pânico (Mark-Down). NÃO tente segurar a queda. "
@@ -225,6 +234,13 @@ def build_composite_regime(df):
         entry_zone = f"Venda (Short) próximo a R$ {ema_s:,.2f} ou perda de R$ {last_row['Low']:,.2f}"
         stop_loss = f"R$ {(current_price + 1.5 * atr):,.2f} (Recuperação de Tendência)"
         take_profit = f"R$ {(current_price - 2.5 * atr):,.2f} (Alvo de Despejo)"
+
+    elif "BAIXA FRACA" in tr:
+        strategy = "Tendência de baixa perdendo força. Possível exaustão de venda. Evite shorts agressivos e monitore reversão."
+        conviction = 45
+        entry_zone = f"Venda em resistência R$ {ema_s:,.2f}"
+        stop_loss = f"R$ {(current_price + atr):,.2f}"
+        take_profit = f"R$ {(current_price - 1.5 * atr):,.2f}"
             
     elif "LATERALIZADO" in tr:
         if "BAIXA" in vr:
